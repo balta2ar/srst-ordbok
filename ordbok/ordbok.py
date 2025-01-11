@@ -4,6 +4,7 @@ import sys
 from http.server import BaseHTTPRequestHandler
 from http.server import HTTPServer
 from threading import Thread
+from urllib.error import URLError
 from urllib.request import urlopen, Request
 from PyQt6 import QtGui
 
@@ -16,8 +17,11 @@ from urllib3 import disable_warnings
 USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/67.0.3396.99 Safari/537.36'
 
 def is_interactive():
-    import __main__ as main
-    return not hasattr(main, '__file__')
+    # import __main__ as main
+    # result = not hasattr(main, '__file__')
+    result = __name__ == '__main__'
+    print('is_interactive', result)
+    return result
 
 def http_post(url, data):
     with urlopen(url, data) as resp:
@@ -52,15 +56,25 @@ class WatchDog:
         self.on_show_callback = None
     def start(self):
         try:
+            print(f'trying to start watchdog on {self.host}:{self.port}')
             self.server = WatchDog.Server(self.host, self.port, self._call_on_show)
             self.thread = Thread(target=self.server.serve_forever, daemon=True)
             self.thread.start()
+            print(f'watchdog started on {self.host}:{self.port}')
             return True
-        except OSError:
+        except OSError as e:
+            print(f'watchdog start error: {e}')
             return False
     def show(self):
-        print('Watchdog already running, showing previous instance')
-        http_post(self.get_show_url(), b'')
+        url = self.get_show_url()
+        print(f'Trying to show previous instance at {url}')
+        try:
+            http_post(url, b'')
+            return True
+        except URLError as e:
+            print(f'Failed to show previous instance, trying to start: {e}')
+        self.start()
+        return False
     def get_show_url(self):
         return 'http://{0}:{1}/'.format(self.host, self.port)
     def _call_on_show(self):
@@ -74,8 +88,8 @@ UI_PORT = 5660
 WATCHDOG_HOST = 'localhost'
 WATCHDOG_PORT = 5650
 dog = WatchDog(WATCHDOG_HOST, WATCHDOG_PORT)
-if (not is_interactive()) and (not dog.start()):
-    dog.show()
+# if (not is_interactive()) and (not dog.start()):
+if dog.show():
     sys.exit()
 
 import logging
@@ -112,7 +126,7 @@ from asyncio import Queue as AQueue
 import time
 from functools import wraps
 import socket
-from telnetlib import Telnet
+# from telnetlib import Telnet
 
 from requests.exceptions import HTTPError, ReadTimeout, ConnectionError
 from bs4 import BeautifulSoup
@@ -132,10 +146,11 @@ from PyQt6.QtCore import pyqtSignal, pyqtSlot
 
 from html2text import HTML2Text
 
-from yatetradki.reader.dsl import lookup as dsl_lookup
-from yatetradki.uitools.index.search import search as index_search
+# from yatetradki.reader.dsl import lookup as dsl_lookup
+from ordbok.reader.dsl import lookup as dsl_lookup
+# from yatetradki.uitools.index.search import search as index_search
 #from yatetradki.tools.telega import TdlibClient, WordLogger
-from yatetradki.utils import must_env
+# from yatetradki.utils import must_env
 
 FORMAT = '%(asctime)-15s %(levelname)s %(message)s'
 logging.basicConfig(format=FORMAT, level=logging.DEBUG)
@@ -1336,14 +1351,15 @@ def human_to_seconds(text):
     return h*3600+m*60+s
 
 def vlc_seek(seconds):
-    password = 'pass'
-    try:
-        with Telnet('localhost', 4212) as tn:
-            tn.read_until(b'Password: ')
-            tn.write(password.encode('ascii') + b'\n')
-            tn.write(f'seek {seconds}'.encode('ascii') + b'\n')
-    except ConnectionRefusedError as e:
-        logging.error('cannot seek vlc: %s', e)
+    pass
+#     password = 'pass'
+#     try:
+#         with Telnet('localhost', 4212) as tn:
+#             tn.read_until(b'Password: ')
+#             tn.write(password.encode('ascii') + b'\n')
+#             tn.write(f'seek {seconds}'.encode('ascii') + b'\n')
+#     except ConnectionRefusedError as e:
+#         logging.error('cannot seek vlc: %s', e)
 
 class QComboBoxKey(QComboBox):
     def __init__(self, parent, on_key_press):
@@ -1820,7 +1836,8 @@ class AIOHTTPUIServer:
     async def route_aulismedia_next(self, word):
         return AulismediaWord(None, word).flip(1)
     async def route_aulismedia_search_norsk(self, word):
-        return index_search(word.lower())
+        raise NotImplemented
+        # return index_search(word.lower())
     # def route_aulismedia_static(self, word):
     #     return AulismediaWord.static(word)
     async def route_all_word(self, request):
