@@ -6,7 +6,6 @@ from http.server import HTTPServer
 from threading import Thread
 from urllib.error import URLError
 from urllib.request import urlopen, Request
-from PyQt6 import QtGui
 
 from aiohttp import web, ClientSession
 from aiohttp_jinja2 import setup as aiohttp_jinja2_setup
@@ -134,6 +133,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 from playwright.async_api import TimeoutError as PlaywrightTimeoutErrorAsync
 
+from PyQt6 import QtGui
 from PyQt6.QtWidgets import (QApplication, QComboBox, QVBoxLayout,
                              QWidget, QCompleter,
                              QSystemTrayIcon, QMenu)
