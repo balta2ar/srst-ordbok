@@ -2,8 +2,8 @@ from unittest import TestCase
 from os.path import join
 from tempfile import TemporaryDirectory
 
-from yatetradki.reader.dsl import DSLRawReader, DSLIndexer, DSLLookuper
-from yatetradki.reader.dsl import _uniq_at
+from ordbok.reader.dsl import DSLRawReader, DSLIndexer, DSLLookuper
+from ordbok.reader.dsl import _uniq_at
 
 
 HEADER = '''#NAME   "Test"

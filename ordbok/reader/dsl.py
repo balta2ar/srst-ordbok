@@ -11,7 +11,7 @@ from multiprocessing import Pool
 
 from bs4 import BeautifulSoup
 
-from yatetradki.reader.demangle_dsl import _clean_tags
+from ordbok.reader.demangle_dsl import _clean_tags
 
 
 FORMAT = '%(asctime)-15s %(levelname)s %(message)s'

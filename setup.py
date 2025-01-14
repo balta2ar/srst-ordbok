@@ -2,8 +2,8 @@ from setuptools import setup, find_packages
 
 requirements = open('requirements.txt').read().splitlines()
 setup(
-    name='ordbok',
-    version='0.1.0',
+    name='srst-ordbok',
+    version='0.1.3',
     #py_modules=['harken'],
     packages=find_packages(),
     include_package_data=True,
