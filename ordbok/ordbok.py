@@ -1213,6 +1213,94 @@ class TrExMeEnNoWord(TrExMe):
     URL = "https://tr-ex.me/translation/english-norwegian/{0}"
 
 
+class NaobRSCClient:
+    """Fetches naob.no pages using the React Server Components (RSC) wire protocol.
+
+    Sending the ``RSC: 1`` header causes Next.js App Router to return a lightweight
+    RSC payload instead of a full HTML shell that requires JavaScript rendering.
+    The payload embeds the server-rendered HTML as a ``T``-prefixed chunk which we
+    extract and parse with BeautifulSoup — no Playwright / browser needed.
+
+    For words that redirect to the search page (e.g. ``tre`` → ``/søk?q=tre``),
+    the RSC payload of the search page contains the word-list HTML with the same
+    ``page_wordLink`` anchor structure that the existing ``NaobWord.words()`` method
+    already knows how to handle.
+    """
+
+    USER_AGENT = (
+        "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:100.0) Gecko/20100101 Firefox/100.0"
+    )
+    TIMEOUT = NETWORK_TIMEOUT / 1000.0
+    RETRIES = NETWORK_RETRIES
+    # RSC wire-format: a line starting with a hex id, colon, T (= HTML chunk),
+    # hex byte-length, comma, then the raw HTML that follows until end of payload.
+    _RSC_HTML_RE = re.compile(
+        r"^[0-9a-f]+:T[0-9a-f]+,(.*)", re.DOTALL | re.MULTILINE
+    )
+    # RSC JSON chunks contain "href":"/ordbok/xxx" entries for search results.
+    _RSC_HREF_RE = re.compile(r'"href":\s*"(/ordbok/[^"]+)"')
+
+    def _headers(self):
+        return {"User-Agent": self.USER_AGENT, "RSC": "1"}
+
+    async def _fetch_rsc(self, url):
+        """Return raw RSC payload text for *url*, following redirects."""
+        async with ClientSession() as session:
+            for attempt in range(self.RETRIES):
+                try:
+                    logging.info("NaobRSCClient fetch %s", url)
+                    async with session.get(
+                        url,
+                        headers=self._headers(),
+                        timeout=self.TIMEOUT,
+                        allow_redirects=True,
+                    ) as resp:
+                        return await resp.text()
+                except AsyncioTimeoutError as e:
+                    logging.warning(
+                        "NaobRSCClient timeout (%s) fetching %s: %s",
+                        self.TIMEOUT, url, e,
+                    )
+                    if attempt == self.RETRIES - 1:
+                        raise
+
+    def _rsc_to_soup(self, rsc_text):
+        """Extract the HTML payload from an RSC wire-format blob and parse it."""
+        m = self._RSC_HTML_RE.search(rsc_text)
+        if m:
+            html_fragment = m.group(1)
+        else:
+            # No T-chunk found (e.g. tiny router response); try to synthesise
+            # useful content from JSON href entries so that word-list parsing works.
+            hrefs = self._RSC_HREF_RE.findall(rsc_text)
+            # Build a minimal HTML list matching the structure NaobWord.words() expects.
+            items = "".join(
+                f'<li><a class="page_wordLink" href="{h}">{h.split("/")[-1]}</a></li>'
+                for h in hrefs
+            )
+            html_fragment = f'<ul class="page_list">{items}</ul>' if items else ""
+        return parse(html_fragment)
+
+    async def get_soup(self, word):
+        """Return a BeautifulSoup for *word* fetched via RSC (no browser)."""
+        url = f"https://naob.no/ordbok/{word}"
+        rsc_text = await self._fetch_rsc(url)
+        soup = self._rsc_to_soup(rsc_text)
+        # If the RSC payload is tiny and lacks article/page_list content it usually
+        # means the page redirected to /søk (word has multiple entries).  In that
+        # case the redirect was already followed (allow_redirects=True) but the RSC
+        # router response for the *new* URL is what we got.  Re-fetch the søk page
+        # directly to get the full search-results HTML.
+        if (
+            soup.select_one("div.article") is None
+            and not soup.find("a", class_=re.compile(r"^page_wordLink"))
+        ):
+            search_url = f"https://naob.no/søk?q={word}&from=ordbok"
+            rsc_text = await self._fetch_rsc(search_url)
+            soup = self._rsc_to_soup(rsc_text)
+        return soup
+
+
 class NaobWord(WordGetter):
     async def get_async(self):
         soup = await self.get_soup(self.word)
@@ -1224,18 +1312,20 @@ class NaobWord(WordGetter):
         return self.styled()
 
     async def get_soup(self, word):
-        # return parse(await self.client.get_async(self.get_url(word), selector='main > div.container', wait_until='domcontentloaded'))
-        # return parse(await self.client.get_async(self.get_url(word), selector='main div.article', wait_until='domcontentloaded'))
-        selector = [
-            "div.l-main",
-            'ul[class^="page_list"]',
-            'div[class^="page_feedback"]',
-        ]
-        return parse(
-            await self.client.get_async(
-                self.get_url(word), selector=selector, wait_until="domcontentloaded"
-            )
-        )
+        # Use the RSC (React Server Components) client — much faster than Playwright
+        # because it fetches pre-rendered HTML directly without launching a browser.
+        return await NaobRSCClient().get_soup(word)
+        # Legacy Playwright path (kept for reference):
+        # selector = [
+        #     "div.l-main",
+        #     'ul[class^="page_list"]',
+        #     'div[class^="page_feedback"]',
+        # ]
+        # return parse(
+        #     await self.client.get_async(
+        #         self.get_url(word), selector=selector, wait_until="domcontentloaded"
+        #     )
+        # )
 
     def parse(self, soup):
         article = soup.select_one("div.article")
