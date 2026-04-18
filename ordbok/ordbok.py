@@ -1367,30 +1367,223 @@ class NaobWord(WordGetter):
         return "https://naob.no/ordbok/{0}".format(word)
 
 
+class OrdbokeneStaticClient:
+    """Fetches ordbokene.no data using only plain HTTP — no Playwright browser needed.
+
+    Key insight: ordbokene.no is a Nuxt/Vue SSR app that renders the full
+    ``div.article-column`` on the server side.  The only thing that requires JS
+    (the ``Vis bøyning`` button click) is the *inflection table*, and that data
+    is available directly from the opal JSON API
+    (``oda.uib.no/opal/prod/{dict}/article/{id}.json``).
+
+    This client is used by both ``OrdbokeneWord`` (no inflection tables needed)
+    and ``OrdbokeneInflect`` (builds tables from opal JSON).
+    """
+
+    USER_AGENT = (
+        "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:100.0) Gecko/20100101 Firefox/100.0"
+    )
+    TIMEOUT = NETWORK_TIMEOUT / 1000.0
+    RETRIES = NETWORK_RETRIES
+    SUGGEST_URL = (
+        "https://oda.uib.no/opal/prod/api/suggest"
+        "?q={word}&dict=bm&n=20&dform=int&meta=n&include=ei"
+    )
+    ARTICLES_URL = (
+        "https://oda.uib.no/opal/prod/api/articles"
+        "?w={word}&dict=bm,nn&scope=ei"
+    )
+    ARTICLE_URL = "https://oda.uib.no/opal/prod/{dict}/article/{id}.json"
+    PAGE_URL = "https://ordbokene.no/nno/bm,nn/{word}"
+
+    # Norwegian labels for inflection tag combinations used in table headers.
+    _TAG_LABELS = {
+        # verbs
+        ("Inf",): "infinitiv",
+        ("Pres",): "presens",
+        ("Past",): "preteritum",
+        ("PastPerf",): "presens perfektum",  # shown as "har + ..."
+        ("Imp",): "imperativ",
+        ("Inf", "Pass"): "infinitiv passiv",
+        ("Pres", "Pass"): "presens passiv",
+        # nouns
+        ("Sing", "Ind"): "entall ubestemt",
+        ("Sing", "Def"): "entall bestemt",
+        ("Plur", "Ind"): "flertall ubestemt",
+        ("Plur", "Def"): "flertall bestemt",
+        # adjectives
+        ("Masc",): "hankjønn",
+        ("Fem",): "hunkjønn",
+        ("Neuter",): "intetkjønn",
+        ("MascFem",): "hankjønn/hunkjønn",
+        ("Def",): "bestemt form",
+        ("Plur",): "flertall",
+    }
+
+    def _headers(self):
+        return {"User-Agent": self.USER_AGENT, "Accept": "application/json, text/html, */*"}
+
+    async def _get(self, url):
+        """Plain HTTP GET, returns response text."""
+        async with ClientSession() as session:
+            for attempt in range(self.RETRIES):
+                try:
+                    logging.info("OrdbokeneStaticClient GET %s", url)
+                    async with session.get(
+                        url,
+                        headers=self._headers(),
+                        timeout=self.TIMEOUT,
+                        allow_redirects=True,
+                    ) as resp:
+                        return await resp.text()
+                except AsyncioTimeoutError as e:
+                    logging.warning(
+                        "OrdbokeneStaticClient timeout (%s) %s: %s",
+                        self.TIMEOUT, url, e,
+                    )
+                    if attempt == self.RETRIES - 1:
+                        raise
+
+    async def get_suggest(self, word):
+        """Return the canonical dictionary lemma for *word* via the opal suggest API.
+
+        Mirrors the logic of ``OrdbokeneWord.suggest1()`` but uses plain HTTP
+        instead of Playwright.  Returns ``None`` if no match found.
+        """
+        url = self.SUGGEST_URL.format(word=word)
+        text = await self._get(url)
+        # The API wraps JSON in <pre> when served as HTML; strip tags if needed.
+        raw = text[text.find("{") : text.rfind("}") + 1]
+        if not raw:
+            return None
+        resp = loads(raw)
+        a = resp.get("a", {})
+        out = [None]
+        if "exact" in a:
+            out.append(a["exact"][0][0])
+        if "inflect" in a:
+            out.append(a["inflect"][0][0])
+        logging.info("OrdbokeneStaticClient.get_suggest %r -> %s", word, out[-1])
+        return out[-1]
+
+    async def get_page_soup(self, word):
+        """Return a BeautifulSoup of the ordbokene page for *word* (static GET)."""
+        url = self.PAGE_URL.format(word=word)
+        html = await self._get(url)
+        return parse(html)
+
+    async def get_article_ids(self, word):
+        """Return ``{"bm": [...], "nn": [...]}`` article-id lists for *word*."""
+        url = self.ARTICLES_URL.format(word=word)
+        text = await self._get(url)
+        raw = text[text.find("{") : text.rfind("}") + 1]
+        if not raw:
+            return {"bm": [], "nn": []}
+        data = loads(raw)
+        arts = data.get("articles", {})
+        return {
+            "bm": arts.get("bm", []),
+            "nn": arts.get("nn", []),
+        }
+
+    async def get_article_json(self, dict_name, article_id):
+        """Return the parsed JSON for a single article from the opal API."""
+        url = self.ARTICLE_URL.format(dict=dict_name, id=article_id)
+        text = await self._get(url)
+        raw = text[text.find("{") : text.rfind("}") + 1]
+        return loads(raw)
+
+    def _tag_label(self, tags):
+        """Human-readable column label for a list of inflection tags."""
+        key = tuple(tags)
+        if key in self._TAG_LABELS:
+            return self._TAG_LABELS[key]
+        return " ".join(tags).lower() if tags else "—"
+
+    def build_infl_tables(self, article):
+        """Build ``<table class="infl-table sm">`` HTML from an article's paradigm_info.
+
+        The table structure mirrors what the Vue component renders after the
+        ``Vis bøyning`` button is clicked, using the same CSS class names so
+        that ``ordbokene-word.css`` styles apply correctly.
+        """
+        parts = []
+        for lemma in article.get("lemmas", []):
+            lemma_text = lemma.get("lemma", "")
+            for pi in lemma.get("paradigm_info", []):
+                inflections = [
+                    inf for inf in pi.get("inflection", [])
+                    if inf.get("word_form")  # skip None forms
+                ]
+                if not inflections:
+                    continue
+
+                # Build ordered list of unique tag-tuples, preserving first-seen order.
+                seen = {}
+                for inf in inflections:
+                    key = tuple(inf.get("tags") or [])
+                    if key not in seen:
+                        seen[key] = []
+                    seen[key].append(inf["word_form"])
+
+                tags_list = list(seen.keys())
+                word_tags = pi.get("tags", [])
+                group = pi.get("inflection_group", "")
+                caption_text = f"Bøying av {lemma_text} ({', '.join(word_tags).lower()})"
+
+                headers_html = "".join(
+                    f'<th class="infl-label">{self._tag_label(list(t))}</th>'
+                    for t in tags_list
+                )
+                # Each tag-column can have multiple forms (variants); join with " / "
+                cells_html = "".join(
+                    f'<td class="infl-cell">{" / ".join(seen[t])}</td>'
+                    for t in tags_list
+                )
+
+                parts.append(
+                    f'<table class="infl-table sm">'
+                    f'<caption class="caption">{caption_text}</caption>'
+                    f"<thead><tr>{headers_html}</tr></thead>"
+                    f"<tbody><tr>{cells_html}</tr></tbody>"
+                    f"</table>"
+                )
+        return "\n".join(parts)
+
+    # Stub so OrdbokeneWord can call self.client.get_async() if needed elsewhere,
+    # but all ordbokene-specific paths use the methods above directly.
+    async def get_async(self, url, **kwargs):
+        return await self._get(url)
+
+
 class OrdbokeneWord(WordGetter):
     # https://ordbokene.no/bm/search?q=mor&scope=ei
     async def get_async(self):
-        # action = "for (let x of document.querySelectorAll('button.show-inflection')) x.click()"
-        # action = "document.querySelector('form').submit(); for (let x of document.querySelectorAll('button.btn-primary')) x.click();"
-        action = "for (let x of document.querySelectorAll('button.btn-primary')) x.click(); document.querySelectorAll('button.btn-primary').length"
-        # selector = 'div.hits, div.no_results'
-        selector = "div.article-column"
-        action_selector = "button.btn-primary"
-        # selector = 'h2#bm_heading'
-        word = await self.suggest1(self.word)
+        # Use OrdbokeneStaticClient: no Playwright browser needed.
+        # The full div.article-column is rendered server-side by Nuxt/Vue SSR,
+        # so a plain HTTP GET returns the same content.  The only JS-rendered
+        # part is the infl-table (loaded by clicking "Vis bøyning"), but
+        # parse() removes it anyway — so the click was never needed here.
+        static = OrdbokeneStaticClient()
+        word = await static.get_suggest(self.word)
         if not word:
             raise NoContent(f'OrdbokeneWord: word="{self.word}"')
-        soup = parse(
-            await self.client.get_async(
-                self.get_url(word),
-                selector=selector,
-                action=action,
-                action_selector=action_selector,
-                wait_until="networkidle",
-            )
-        )
+        soup = await static.get_page_soup(word)
         self.parse(soup)
         return self.styled()
+
+        # Legacy Playwright path (kept for reference):
+        # action = "for (let x of document.querySelectorAll('button.btn-primary')) x.click(); document.querySelectorAll('button.btn-primary').length"
+        # selector = "div.article-column"
+        # action_selector = "button.btn-primary"
+        # word = await self.suggest1(self.word)
+        # if not word:
+        #     raise NoContent(f'OrdbokeneWord: word="{self.word}"')
+        # soup = parse(await self.client.get_async(
+        #     self.get_url(word), selector=selector, action=action,
+        #     action_selector=action_selector, wait_until="networkidle"))
+        # self.parse(soup)
+        # return self.styled()
 
     def parse(self, soup):
         no_results = soup.select_one("span.result-count-text")
@@ -1441,20 +1634,25 @@ class OrdbokeneWord(WordGetter):
 
 
 class OrdbokeneInflect(OrdbokeneWord):
-    def parse(self, soup):
-        no_results = soup.select_one("span.result-count-text")
-        if no_results and no_results.text.strip() == "0":
-            raise NoContent(
-                'OrdbokeneWord: word="{0}"\n\n{1}'.format(
-                    self.word, no_results.prettify()
-                )
-            )
-        # soup = remove_all(soup, 'button.btn-primary')
-        parts = []
-        for tag in soup.select("table.infl-table"):
-            # for tag in soup.select('div.infl-wrapper'):
-            parts.append(tag.prettify())
-        self.html = "\n".join(parts)
+    async def get_async(self):
+        # Use OrdbokeneStaticClient: fetch article JSON from the opal API and
+        # reconstruct inflection tables without launching a browser.
+        static = OrdbokeneStaticClient()
+        word = await static.get_suggest(self.word)
+        if not word:
+            raise NoContent(f'OrdbokeneInflect: word="{self.word}"')
+        # Fetch article IDs and then all article JSONs in parallel.
+        ids = await static.get_article_ids(word)
+        tasks = (
+            [static.get_article_json("bm", i) for i in ids.get("bm", [])]
+            + [static.get_article_json("nn", i) for i in ids.get("nn", [])]
+        )
+        articles = await gather(*tasks)
+        parts = [static.build_infl_tables(a) for a in articles if a]
+        self.html = "\n".join(p for p in parts if p)
+        if not self.html:
+            raise NoContent(f'OrdbokeneInflect: no inflection data for word="{self.word}"')
+        return self.styled()
 
 
 class Inflection(WordGetter):
