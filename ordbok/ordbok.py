@@ -294,17 +294,27 @@ def http_get_sync(url):
         return resp.read()
 
 
-async def http_get_async(url, timeout=None):
-    USER_AGENT = (
+async def http_get_async(url, timeout=None, headers=None, extra_headers=None, allow_redirects=True):
+    _DEFAULT_UA = (
         "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:100.0) Gecko/20100101 Firefox/100.0"
     )
-    headers = {"User-Agent": USER_AGENT}
+    if timeout is None:
+        timeout = NETWORK_TIMEOUT / 1000.0
+    if headers is None:
+        headers = {"User-Agent": _DEFAULT_UA}
+    if extra_headers:
+        headers = {**headers, **extra_headers}
     retries = NETWORK_RETRIES
     async with ClientSession() as session:
         for i in range(retries):
             try:
                 logging.info("async HTTP GET %s", url)
-                async with session.get(url, timeout=timeout, headers=headers) as resp:
+                async with session.get(
+                    url,
+                    timeout=timeout,
+                    headers=headers,
+                    allow_redirects=allow_redirects,
+                ) as resp:
                     return await resp.text()
             except AsyncioTimeoutError as e:
                 logging.warning('timeout (%s) getting "%s": "%s"', timeout, url, e)
@@ -1227,11 +1237,6 @@ class NaobRSCClient:
     already knows how to handle.
     """
 
-    USER_AGENT = (
-        "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:100.0) Gecko/20100101 Firefox/100.0"
-    )
-    TIMEOUT = NETWORK_TIMEOUT / 1000.0
-    RETRIES = NETWORK_RETRIES
     # RSC wire-format: a line starting with a hex id, colon, T (= HTML chunk),
     # hex byte-length, comma, then the raw HTML that follows until end of payload.
     _RSC_HTML_RE = re.compile(
@@ -1240,29 +1245,10 @@ class NaobRSCClient:
     # RSC JSON chunks contain "href":"/ordbok/xxx" entries for search results.
     _RSC_HREF_RE = re.compile(r'"href":\s*"(/ordbok/[^"]+)"')
 
-    def _headers(self):
-        return {"User-Agent": self.USER_AGENT, "RSC": "1"}
-
     async def _fetch_rsc(self, url):
         """Return raw RSC payload text for *url*, following redirects."""
-        async with ClientSession() as session:
-            for attempt in range(self.RETRIES):
-                try:
-                    logging.info("NaobRSCClient fetch %s", url)
-                    async with session.get(
-                        url,
-                        headers=self._headers(),
-                        timeout=self.TIMEOUT,
-                        allow_redirects=True,
-                    ) as resp:
-                        return await resp.text()
-                except AsyncioTimeoutError as e:
-                    logging.warning(
-                        "NaobRSCClient timeout (%s) fetching %s: %s",
-                        self.TIMEOUT, url, e,
-                    )
-                    if attempt == self.RETRIES - 1:
-                        raise
+        logging.info("NaobRSCClient fetch %s", url)
+        return await http_get_async(url, extra_headers={"RSC": "1"})
 
     def _rsc_to_soup(self, rsc_text):
         """Extract the HTML payload from an RSC wire-format blob and parse it."""
@@ -1385,11 +1371,6 @@ class OrdbokeneStaticClient:
     and ``OrdbokeneInflect`` (builds tables from opal JSON).
     """
 
-    USER_AGENT = (
-        "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:100.0) Gecko/20100101 Firefox/100.0"
-    )
-    TIMEOUT = NETWORK_TIMEOUT / 1000.0
-    RETRIES = NETWORK_RETRIES
     SUGGEST_URL = (
         "https://oda.uib.no/opal/prod/api/suggest"
         "?q={word}&dict=bm&n=20&dform=int&meta=n&include=ei"
@@ -1425,29 +1406,10 @@ class OrdbokeneStaticClient:
         ("Plur",): "flertall",
     }
 
-    def _headers(self):
-        return {"User-Agent": self.USER_AGENT, "Accept": "application/json, text/html, */*"}
-
     async def _get(self, url):
         """Plain HTTP GET, returns response text."""
-        async with ClientSession() as session:
-            for attempt in range(self.RETRIES):
-                try:
-                    logging.info("OrdbokeneStaticClient GET %s", url)
-                    async with session.get(
-                        url,
-                        headers=self._headers(),
-                        timeout=self.TIMEOUT,
-                        allow_redirects=True,
-                    ) as resp:
-                        return await resp.text()
-                except AsyncioTimeoutError as e:
-                    logging.warning(
-                        "OrdbokeneStaticClient timeout (%s) %s: %s",
-                        self.TIMEOUT, url, e,
-                    )
-                    if attempt == self.RETRIES - 1:
-                        raise
+        logging.info("OrdbokeneStaticClient GET %s", url)
+        return await http_get_async(url)
 
     async def get_suggest(self, word):
         """Return the canonical dictionary lemma for *word* via the opal suggest API.
@@ -1554,11 +1516,6 @@ class OrdbokeneStaticClient:
                     f"</table>"
                 )
         return "\n".join(parts)
-
-    # Stub so OrdbokeneWord can call self.client.get_async() if needed elsewhere,
-    # but all ordbokene-specific paths use the methods above directly.
-    async def get_async(self, url, **kwargs):
-        return await self._get(url)
 
 
 class OrdbokeneWord(WordGetter):
