@@ -1346,10 +1346,15 @@ class NaobWord(WordGetter):
         elif no_content:
             logging.info("NaobWord: NoContent")
             raise NoContent('NaobWord: word="{0}"'.format(self.word))
+        elif container is None:
+            # RSC soup had no article, no NEXT_NOT_FOUND, and no page_list —
+            # word is not in naob (e.g. the RSC payload was a tiny router frame
+            # without an HTML chunk, and the søk fallback was also empty).
+            logging.info("NaobWord: NoContent (no container)")
+            raise NoContent('NaobWord: word="{0}"'.format(self.word))
         else:
             logging.info("NaobWord: container: page_list")
             return container.prettify()
-            # return extract('NoabWord', container, 'div', {'class': 'container'})
 
     def words(self, soup) -> List[str]:
         # import ipdb; ipdb.set_trace()
